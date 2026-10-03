@@ -54,6 +54,7 @@
       <label for="proto">Protocolo:</label>
       <select id="proto">
         <option value="auto">Detectar automáticamente</option>
+        <option value="govee">Govee (H6xxx)</option>
         <option value="elk">ELK-BLEDOM / duoCo / Lotus Lamp (FFF0)</option>
         <option value="triones">Triones / HappyLighting / LEDBLE (FFD5)</option>
       </select>
@@ -88,8 +89,26 @@
 </main>
 
 <script>
-// Known cheap BLE LED controller protocols.
+// Govee BLE frame: 0x33 + data, zero-padded to 19 bytes, plus XOR checksum.
+const govee = (...data) => {
+  const f = [0x33, ...data, ...Array(18 - data.length).fill(0)];
+  return [...f, f.reduce((a, b) => a ^ b, 0)];
+};
+
+// Known BLE LED controller protocols. A command may return one frame or a list of frames.
 const PROTOCOLS = {
+  govee: {
+    service: '00010203-0405-0607-0809-0a0b0c0d1910', char: '00010203-0405-0607-0809-0a0b0c0d2b11',
+    on:  () => govee(0x01, 0x01),
+    off: () => govee(0x01, 0x00),
+    // Models use different colour modes; the light ignores the ones it does not support.
+    color: (r, g, b) => [
+      govee(0x05, 0x02, r, g, b),
+      govee(0x05, 0x0d, r, g, b),
+      govee(0x05, 0x15, 0x01, r, g, b, 0, 0, 0, 0, 0, 0xff, 0xff),
+    ],
+    bright: (p) => govee(0x04, Math.round(255 * p / 100)),
+  },
   elk: {
     service: 0xfff0, char: 0xfff3,
     on:  () => [0x7e, 0x00, 0x04, 0xf0, 0x00, 0x01, 0xff, 0x00, 0xef],
@@ -119,13 +138,16 @@ const setEnabled = (on) => {
 };
 const hex = (bytes) => bytes.map((b) => b.toString(16).padStart(2, '0')).join(' ');
 
-async function send(bytes) {
+async function send(payload) {
   if (!characteristic) return;
-  const data = new Uint8Array(bytes);
+  const frames = Array.isArray(payload[0]) ? payload : [payload];
   try {
-    if (characteristic.properties.writeWithoutResponse) await characteristic.writeValueWithoutResponse(data);
-    else await characteristic.writeValueWithResponse(data);
-    log(`→ ${hex(bytes)}`);
+    for (const bytes of frames) {
+      const data = new Uint8Array(bytes);
+      if (characteristic.properties.writeWithoutResponse) await characteristic.writeValueWithoutResponse(data);
+      else await characteristic.writeValueWithResponse(data);
+      log(`→ ${hex(bytes)}`);
+    }
   } catch (e) {
     log(`Error al enviar: ${e.message}`);
   }
@@ -181,7 +203,7 @@ async function logServices(server) {
       log(`Servicio ${s.uuid}: ${chars.map((c) => c.uuid.slice(4, 8)).join(', ')}`);
     }
   } catch (e) {
-    log('Solo se pueden listar servicios declarados (FFF0, FFD5).');
+    log('Solo se pueden listar servicios declarados (Govee, FFF0, FFD5).');
   }
 }
 

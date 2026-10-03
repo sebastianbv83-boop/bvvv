@@ -2,10 +2,25 @@
 
 Dos formas de encontrar y controlar una luz LED Bluetooth (BLE) barata desde el computador.
 
-Protocolos soportados (son los más comunes):
+## La forma más fácil (3 pasos)
+
+1. Instala Python desde <https://www.python.org/downloads/>.
+   En Windows, **marca la casilla "Add Python to PATH"** durante la instalación.
+2. Descarga esta carpeta: en GitHub, botón verde **Code → Download ZIP**, y descomprímela.
+3. Cierra la app Govee del celular y haz **doble clic** en:
+   - Windows: `iniciar-windows.bat`
+   - Mac: `iniciar-mac.command` (si te bloquea: clic derecho → Abrir)
+
+Se abre una ventana que busca la luz sola y te muestra un menú: escribe `E` para encender,
+`A` para apagar, un número para elegir color, `B` para el brillo, y pulsa Enter.
+
+## Detalles técnicos
+
+Protocolos soportados:
 
 | Protocolo | Apps del celular | Nombre típico de la luz |
 |---|---|---|
+| Govee BLE | Govee Home | `Govee_H6…`, `ihoment_H6…`, `GBK_H6…`, `Minger_H6…` |
 | ELK-BLEDOM (servicio `FFF0`) | duoCo Strip, Lotus Lamp X, Lotus Lantern | `ELK-BLEDOM`, `MELK-…`, `duoCo…` |
 | Triones (servicio `FFD5`) | HappyLighting, Triones, LEDBLE | `Triones-…`, `LEDBLE-…`, `QHM-…`, `Dream~…` |
 
@@ -47,4 +62,5 @@ físicamente, repite `scan` mientras te mueves con el portátil: cuanto más alt
 
 - Ejecuta `python led_control.py --address <dirección> services` y comparte la salida:
   con ella se puede añadir el protocolo de tu luz.
-- Las luces Govee, Philips Hue o Magic Home Wi-Fi usan otros protocolos y no están soportadas todavía.
+- Algunos modelos Govee muy recientes cifran la conexión Bluetooth y no responden; en ese caso dime el modelo (empieza por `H`, viene en la caja o en la app).
+- Philips Hue o Magic Home Wi-Fi usan otros protocolos y no están soportadas todavía.

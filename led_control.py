@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Find and control a cheap Bluetooth LE LED light from the computer.
 
+Run without arguments for an interactive menu.
+
 Examples:
     python led_control.py scan
     python led_control.py on
@@ -19,7 +21,33 @@ def uuid16(short):
     return f"0000{short:04x}-0000-1000-8000-00805f9b34fb"
 
 
+def govee_packet(*data):
+    """Govee BLE frame: 0x33 + data, zero-padded to 19 bytes, plus XOR checksum."""
+    frame = [0x33, *data] + [0x00] * (18 - len(data))
+    checksum = 0
+    for b in frame:
+        checksum ^= b
+    return frame + [checksum]
+
+
+def govee_color(r, g, b):
+    # Govee models use different colour modes; unsupported frames are ignored by the light.
+    return [
+        govee_packet(0x05, 0x02, r, g, b),  # older models (H6113, H6127, H6181...)
+        govee_packet(0x05, 0x0D, r, g, b),  # newer models (H6159, H6008...)
+        govee_packet(0x05, 0x15, 0x01, r, g, b, 0, 0, 0, 0, 0, 0xFF, 0xFF),  # segmented strips (H619x...)
+    ]
+
+
 PROTOCOLS = {
+    "govee": {
+        "service": "00010203-0405-0607-0809-0a0b0c0d1910",
+        "char": "00010203-0405-0607-0809-0a0b0c0d2b11",
+        "on": lambda: govee_packet(0x01, 0x01),
+        "off": lambda: govee_packet(0x01, 0x00),
+        "color": govee_color,
+        "brightness": lambda p: govee_packet(0x04, round(255 * p / 100)),
+    },
     "elk": {  # ELK-BLEDOM, duoCo Strip, Lotus Lamp, MELK...
         "service": uuid16(0xFFF0),
         "char": uuid16(0xFFF3),
@@ -38,7 +66,7 @@ PROTOCOLS = {
     },
 }
 
-LED_NAME_HINTS = ("ELK", "BLEDOM", "MELK", "DUOCO", "LED", "TRIONES", "QHM", "DREAM", "LIGHT", "LAMP", "STRIP")
+LED_NAME_HINTS = ("GOVEE", "IHOMENT", "GBK_", "MINGER", "_H6", "ELK", "BLEDOM", "MELK", "DUOCO", "LED", "TRIONES", "QHM", "DREAM", "LIGHT", "LAMP", "STRIP")
 
 
 def signal_label(rssi):
@@ -113,8 +141,62 @@ async def run(args):
             else:
                 level = round(255 * args.percent / 100)
                 payload = proto["color"](level, level, level)
-        await client.write_gatt_char(proto["char"], bytes(payload), response=False)
-        print(f"Enviado: {bytes(payload).hex(' ')}")
+        await send(client, proto, payload)
+
+
+async def send(client, proto, payload):
+    frames = payload if isinstance(payload[0], list) else [payload]
+    for frame in frames:
+        await client.write_gatt_char(proto["char"], bytes(frame), response=False)
+        await asyncio.sleep(0.05)
+    print("Listo ✔")
+
+
+COLORS = {
+    "1": ("Rojo", (255, 0, 0)), "2": ("Verde", (0, 255, 0)), "3": ("Azul", (0, 0, 255)),
+    "4": ("Amarillo", (255, 200, 0)), "5": ("Morado", (160, 0, 255)), "6": ("Blanco", (255, 255, 255)),
+}
+
+
+async def menu():
+    """Simple interactive menu for double-click use: connects once and stays connected."""
+    print("=== Control de luz LED Bluetooth ===")
+    print("Asegúrate de que la luz esté enchufada y la app Govee del celular CERRADA.\n")
+    print("Buscando tu luz (unos 8 segundos)...")
+    address = await find_led(8.0)
+    async with BleakClient(address) as client:
+        proto = detect_protocol(client, "auto")
+        print("¡Conectado!\n")
+        while True:
+            print("  E) Encender      A) Apagar      B) Brillo")
+            print("  " + "   ".join(f"{k}) {name}" for k, (name, _) in COLORS.items()))
+            print("  S) Salir")
+            choice = input("Elige una opción y pulsa Enter: ").strip().upper()
+            if choice == "S":
+                break
+            if not client.is_connected:
+                print("Se perdió la conexión. Vuelve a abrir el programa.")
+                break
+            if choice == "E":
+                await send(client, proto, proto["on"]())
+            elif choice == "A":
+                await send(client, proto, proto["off"]())
+            elif choice in COLORS:
+                await send(client, proto, proto["color"](*COLORS[choice][1]))
+            elif choice == "B":
+                try:
+                    pct = percent(input("Brillo de 1 a 100: "))
+                except (ValueError, argparse.ArgumentTypeError):
+                    print("Número no válido.\n")
+                    continue
+                if proto["brightness"]:
+                    await send(client, proto, proto["brightness"](pct))
+                else:
+                    level = round(255 * pct / 100)
+                    await send(client, proto, proto["color"](level, level, level))
+            else:
+                print("Opción no válida.")
+            print()
 
 
 def byte(value):
@@ -132,6 +214,9 @@ def percent(value):
 
 
 def main():
+    if len(sys.argv) == 1:
+        asyncio.run(menu())
+        return
     parser = argparse.ArgumentParser(description="Control de luz LED Bluetooth")
     parser.add_argument("--address", help="Dirección MAC/UUID de la luz (si no, se busca sola)")
     parser.add_argument("--protocol", choices=["auto", *PROTOCOLS], default="auto")

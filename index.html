@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Control LED Bluetooth</title>
+<style>
+  :root {
+    --bg: #f4f4f7; --card: #ffffff; --text: #1d1d24; --muted: #6b6b78;
+    --accent: #5b5bf0; --border: #dcdce4; --ok: #1f9d55; --err: #d64545;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14141a; --card: #1e1e27; --text: #ececf1; --muted: #9a9aa8;
+      --accent: #8080ff; --border: #33333f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 520px; margin: 0 auto; display: grid; gap: 16px; }
+  h1 { font-size: 1.5rem; margin: 0; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button {
+    font: inherit; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  label { color: var(--muted); font-size: .9rem; }
+  input[type=range] { width: 100%; }
+  input[type=color] { width: 64px; height: 44px; border: none; background: none; padding: 0; }
+  select { font: inherit; padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); }
+  .swatches button { width: 40px; height: 40px; padding: 0; border-radius: 50%; }
+  #status { font-size: .9rem; color: var(--muted); }
+  #status.ok { color: var(--ok); } #status.err { color: var(--err); }
+  #log { font: 12px/1.4 ui-monospace, monospace; color: var(--muted); max-height: 160px; overflow: auto; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1>💡 Control LED Bluetooth</h1>
+
+  <section class="card">
+    <div class="row">
+      <button id="connect" class="primary">Buscar y conectar</button>
+      <button id="disconnect" disabled>Desconectar</button>
+    </div>
+    <p id="status">Desconectado. Enciende la luz y cierra la app del celular antes de conectar.</p>
+    <div class="row">
+      <label for="proto">Protocolo:</label>
+      <select id="proto">
+        <option value="auto">Detectar automáticamente</option>
+        <option value="elk">ELK-BLEDOM / duoCo / Lotus Lamp (FFF0)</option>
+        <option value="triones">Triones / HappyLighting / LEDBLE (FFD5)</option>
+      </select>
+    </div>
+  </section>
+
+  <section class="card" id="controls">
+    <div class="row">
+      <button data-cmd="on" disabled>Encender</button>
+      <button data-cmd="off" disabled>Apagar</button>
+      <input type="color" id="color" value="#ffffff" disabled>
+    </div>
+    <div class="row swatches" style="margin-top:12px">
+      <button data-hex="#ff0000" style="background:#ff0000" disabled aria-label="Rojo"></button>
+      <button data-hex="#00ff00" style="background:#00ff00" disabled aria-label="Verde"></button>
+      <button data-hex="#0000ff" style="background:#0000ff" disabled aria-label="Azul"></button>
+      <button data-hex="#ffff00" style="background:#ffff00" disabled aria-label="Amarillo"></button>
+      <button data-hex="#ff00ff" style="background:#ff00ff" disabled aria-label="Magenta"></button>
+      <button data-hex="#00ffff" style="background:#00ffff" disabled aria-label="Cian"></button>
+      <button data-hex="#ffffff" style="background:#ffffff" disabled aria-label="Blanco"></button>
+    </div>
+    <div style="margin-top:12px">
+      <label for="bright">Brillo: <span id="brightVal">100</span>%</label>
+      <input type="range" id="bright" min="1" max="100" value="100" disabled>
+    </div>
+  </section>
+
+  <section class="card">
+    <label>Registro</label>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script>
+// Known cheap BLE LED controller protocols.
+const PROTOCOLS = {
+  elk: {
+    service: 0xfff0, char: 0xfff3,
+    on:  () => [0x7e, 0x00, 0x04, 0xf0, 0x00, 0x01, 0xff, 0x00, 0xef],
+    off: () => [0x7e, 0x00, 0x04, 0x00, 0x00, 0x00, 0xff, 0x00, 0xef],
+    color: (r, g, b) => [0x7e, 0x00, 0x05, 0x03, r, g, b, 0x00, 0xef],
+    bright: (p) => [0x7e, 0x00, 0x01, p, 0x00, 0x00, 0x00, 0x00, 0xef],
+  },
+  triones: {
+    service: 0xffd5, char: 0xffd9,
+    on:  () => [0xcc, 0x23, 0x33],
+    off: () => [0xcc, 0x24, 0x33],
+    color: (r, g, b) => [0x56, r, g, b, 0x00, 0xf0, 0xaa],
+    bright: null, // no native brightness: emulated by scaling the colour
+  },
+};
+
+let device = null, characteristic = null, proto = null;
+let lastColor = [255, 255, 255];
+
+const $ = (s) => document.querySelector(s);
+const log = (msg) => { $('#log').textContent = `${new Date().toLocaleTimeString()}  ${msg}\n` + $('#log').textContent; };
+const setStatus = (msg, cls = '') => { $('#status').textContent = msg; $('#status').className = cls; };
+const setEnabled = (on) => {
+  document.querySelectorAll('#controls button, #controls input').forEach((el) => el.disabled = !on);
+  $('#disconnect').disabled = !on;
+  $('#connect').disabled = on;
+};
+const hex = (bytes) => bytes.map((b) => b.toString(16).padStart(2, '0')).join(' ');
+
+async function send(bytes) {
+  if (!characteristic) return;
+  const data = new Uint8Array(bytes);
+  try {
+    if (characteristic.properties.writeWithoutResponse) await characteristic.writeValueWithoutResponse(data);
+    else await characteristic.writeValueWithResponse(data);
+    log(`→ ${hex(bytes)}`);
+  } catch (e) {
+    log(`Error al enviar: ${e.message}`);
+  }
+}
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    setStatus('Este navegador no soporta Web Bluetooth. Usa Chrome o Edge en Windows, macOS, Linux o Android.', 'err');
+    return;
+  }
+  try {
+    setStatus('Elige tu luz en la ventana que abre el navegador…');
+    device = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
+      optionalServices: Object.values(PROTOCOLS).map((p) => p.service),
+    });
+    log(`Dispositivo elegido: ${device.name || '(sin nombre)'} [${device.id}]`);
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+
+    setStatus(`Conectando a ${device.name || 'dispositivo'}…`);
+    const server = await device.gatt.connect();
+
+    const wanted = $('#proto').value;
+    const order = wanted === 'auto' ? Object.keys(PROTOCOLS) : [wanted];
+    for (const key of order) {
+      try {
+        const service = await server.getPrimaryService(PROTOCOLS[key].service);
+        characteristic = await service.getCharacteristic(PROTOCOLS[key].char);
+        proto = PROTOCOLS[key];
+        log(`Protocolo detectado: ${key}`);
+        break;
+      } catch { /* try next protocol */ }
+    }
+    if (!characteristic) {
+      await logServices(server);
+      throw new Error('No reconozco el protocolo de esta luz. Revisa el registro y comparte los servicios encontrados.');
+    }
+    setStatus(`Conectado a ${device.name || 'dispositivo'} ✔`, 'ok');
+    setEnabled(true);
+  } catch (e) {
+    if (e.name === 'NotFoundError') setStatus('No se eligió ningún dispositivo.');
+    else setStatus(e.message, 'err');
+    log(`Error: ${e.message}`);
+    if (device?.gatt.connected) device.gatt.disconnect();
+  }
+}
+
+async function logServices(server) {
+  try {
+    const services = await server.getPrimaryServices();
+    for (const s of services) {
+      const chars = await s.getCharacteristics();
+      log(`Servicio ${s.uuid}: ${chars.map((c) => c.uuid.slice(4, 8)).join(', ')}`);
+    }
+  } catch (e) {
+    log('Solo se pueden listar servicios declarados (FFF0, FFD5).');
+  }
+}
+
+function onDisconnected() {
+  characteristic = null; proto = null;
+  setEnabled(false);
+  setStatus('Desconectado.');
+  log('Desconectado');
+}
+
+async function setColor(r, g, b) {
+  lastColor = [r, g, b];
+  await send(proto.color(r, g, b));
+}
+
+async function setBrightness(pct) {
+  if (proto.bright) return send(proto.bright(pct));
+  const [r, g, b] = lastColor.map((c) => Math.round(c * pct / 100));
+  return send(proto.color(r, g, b));
+}
+
+function hexToRgb(h) {
+  const n = parseInt(h.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+$('#connect').onclick = connect;
+$('#disconnect').onclick = () => device?.gatt.disconnect();
+document.querySelectorAll('[data-cmd]').forEach((b) => b.onclick = () => send(proto[b.dataset.cmd]()));
+document.querySelectorAll('[data-hex]').forEach((b) => b.onclick = () => {
+  $('#color').value = b.dataset.hex;
+  setColor(...hexToRgb(b.dataset.hex));
+});
+$('#color').oninput = (e) => setColor(...hexToRgb(e.target.value));
+$('#bright').oninput = (e) => { $('#brightVal').textContent = e.target.value; setBrightness(+e.target.value); };
+</script>
+</body>
+</html>
